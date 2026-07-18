@@ -52,11 +52,11 @@ class CamoufoxBypasser:
             self.log_message(f"Error parsing proxy {proxy}: {e}")
             return None
 
-    async def setup_browser(self, proxy: Optional[str] = None, lang: str = "en", user_agent: Optional[str] = None) -> tuple:
+    async def setup_browser(self, proxy: Optional[str] = None, lang: str = "en-US", user_agent: Optional[str] = None) -> tuple:
         """Setup Camoufox browser with random OS and configuration. Returns (browser, context, page)."""
         # Clear expired cache entries
         self.cookie_cache.clear_expired()
-        
+
         # Determine OS from user_agent if provided, otherwise random
         selected_os = None
         if user_agent:
