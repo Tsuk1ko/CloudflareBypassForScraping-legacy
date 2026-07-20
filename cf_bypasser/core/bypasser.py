@@ -247,6 +247,31 @@ class CamoufoxBypasser:
         
         return camoufox, browser, context, page
 
+    async def wait_for_page_settle(self, page, timeout_ms: int = 15000) -> None:
+        """Wait for the page to finish navigating/loading.
+
+        Right after a Cloudflare challenge passes, the page redirects to the real
+        content. Touching the page during that navigation raises
+        'Execution context was destroyed', so we let it settle first.
+        """
+        for state in ("domcontentloaded", "load", "networkidle"):
+            try:
+                await page.wait_for_load_state(state, timeout=timeout_ms)
+            except Exception:
+                # networkidle in particular may time out on long-polling pages —
+                # that's acceptable, we just want a best-effort settle.
+                pass
+
+    async def get_user_agent(self, page) -> str:
+        """Read navigator.userAgent, retrying across post-challenge navigations."""
+        for _ in range(3):
+            try:
+                return await page.evaluate("navigator.userAgent")
+            except Exception:
+                await self.wait_for_page_settle(page)
+                await asyncio.sleep(1)
+        return ""
+
     async def is_bypassed(self, page) -> bool:
         """Check if Cloudflare challenge has been bypassed."""
         try:
@@ -324,6 +349,7 @@ class CamoufoxBypasser:
                         captcha_type=challenge_type)
                     if await self.is_bypassed(page):
                         self.log_message("Cloudflare challenge solved successfully!")
+                        await self.wait_for_page_settle(page)
                         return True
             except Exception as e:
                 self.log_message(f"Click solver reported: {e}")
@@ -341,6 +367,7 @@ class CamoufoxBypasser:
                 try:
                     if await self.is_bypassed(page):
                         self.log_message("Cloudflare challenge resolved after waiting")
+                        await self.wait_for_page_settle(page)
                         return True
                 except Exception:
                     # Page may be mid-navigation — keep polling
@@ -357,14 +384,16 @@ class CamoufoxBypasser:
 
     async def get_cookies_and_user_agent(self, context, page) -> Dict[str, Any]:
         """Get cookies and user agent after successful bypass."""
+        # Let any post-challenge redirect finish before touching the page.
+        await self.wait_for_page_settle(page)
         try:
             cookies = await context.cookies()
             cookie_dict = {}
             for cookie in cookies:
                 cookie_dict[cookie['name']] = cookie['value']
             
-            # Get user agent from the page
-            user_agent = await page.evaluate("navigator.userAgent")
+            # Get user agent from the page (resilient to mid-navigation)
+            user_agent = await self.get_user_agent(page)
             
             return {
                 "cookies": cookie_dict,
@@ -376,31 +405,45 @@ class CamoufoxBypasser:
 
     async def get_html_content_and_cookies(self, context, page) -> Dict[str, Any]:
         """Get HTML content, cookies, and user agent after successful bypass."""
-        try:
-            cookies = await context.cookies()
-            cookie_dict = {}
-            for cookie in cookies:
-                cookie_dict[cookie['name']] = cookie['value']
-            
-            # Get user agent from the page
-            user_agent = await page.evaluate("navigator.userAgent")
-            
-            # Get HTML content
-            html_content = await page.content()
-            
-            # Get final URL (in case of redirects)
-            final_url = page.url
-            
-            return {
-                "cookies": cookie_dict,
-                "user_agent": user_agent,
-                "html": html_content,
-                "url": final_url,
-                "status_code": 200  # Assuming success if we got here
-            }
-        except Exception as e:
-            self.log_message(f"Error getting HTML content and cookies: {e}")
-            return None
+        # Let any post-challenge redirect finish before extracting content —
+        # otherwise page.content()/evaluate() hit 'Execution context was destroyed'.
+        await self.wait_for_page_settle(page)
+
+        last_err = None
+        for attempt in range(3):
+            try:
+                # Get HTML content (most navigation-sensitive — do it first)
+                html_content = await page.content()
+
+                # Get user agent from the page (resilient to mid-navigation)
+                user_agent = await self.get_user_agent(page)
+
+                # Get final URL (in case of redirects)
+                final_url = page.url
+
+                cookies = await context.cookies()
+                cookie_dict = {}
+                for cookie in cookies:
+                    cookie_dict[cookie['name']] = cookie['value']
+
+                return {
+                    "cookies": cookie_dict,
+                    "user_agent": user_agent,
+                    "html": html_content,
+                    "url": final_url,
+                    "status_code": 200  # Assuming success if we got here
+                }
+            except Exception as e:
+                last_err = e
+                # Most likely mid-navigation ('Execution context was destroyed')
+                # right after the challenge passed — settle and retry.
+                self.log_message(
+                    f"Content extraction attempt {attempt + 1}/3 failed: {e}; settling and retrying...")
+                await self.wait_for_page_settle(page)
+                await asyncio.sleep(1)
+
+        self.log_message(f"Error getting HTML content and cookies: {last_err}")
+        return None
 
     async def get_or_generate_cookies(self, url: str, proxy: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get cached cookies or generate new ones."""
