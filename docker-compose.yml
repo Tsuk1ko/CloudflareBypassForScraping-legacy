@@ -4,10 +4,15 @@ services:
     container_name: cloudflare-bypass
     ports:
       - "8000:8000"
+    environment:
+      # Save failed-attempt artifacts (HTML + screenshots)
+      - SAVE_FAILED_INFO=false
+    volumes:
+      - ./failed_info:/app/failed_info
     deploy:
       resources:
         limits:
           memory: 512M
           cpus: "2"
-    shm_size: 128m
+    shm_size: 256m
     restart: unless-stopped

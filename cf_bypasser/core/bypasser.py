@@ -2,7 +2,9 @@ import asyncio
 import logging
 import os
 import random
+import re
 import time
+from datetime import datetime
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 
@@ -17,6 +19,11 @@ from cf_bypasser.utils.config import BrowserConfig, OPERATING_SYSTEMS
 # Get addon path for Camoufox init script workaround
 ADDON_PATH = get_addon_path()
 
+# Project root (parent of the cf_bypasser package) and directory used to persist
+# failed-attempt artifacts (HTML + screenshot) when SAVE_FAILED_INFO is enabled.
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+FAILED_INFO_DIR = os.path.join(PROJECT_ROOT, "failed_info")
+
 
 class CamoufoxBypasser:
     """Camoufox bypasser with cookie caching and direct proxy support."""
@@ -30,6 +37,108 @@ class CamoufoxBypasser:
         """Log message if logging is enabled."""
         if self.log:
             logging.info(message)
+
+    async def dump_page_state(self, page, reason: str) -> None:
+        """Log the current page state (title, url, full HTML) for debugging failures.
+
+        Always logs regardless of self.log so failures are never silent.
+        """
+        try:
+            url = None
+            try:
+                url = page.url
+            except Exception:
+                url = "<unknown>"
+
+            title = None
+            try:
+                title = await page.title()
+            except Exception as e:
+                title = f"<error getting title: {e}>"
+
+            html_content = None
+            try:
+                html_content = await page.content()
+            except Exception as e:
+                html_content = f"<error getting content: {e}>"
+
+            content_length = len(html_content) if isinstance(html_content, str) else 0
+
+            # List iframes present on the page — the click solver fails with
+            # "Cloudflare iframes not found", so this is often the key signal.
+            frame_info = "<unavailable>"
+            try:
+                frame_urls = []
+                for frame in page.frames:
+                    try:
+                        frame_urls.append(frame.url)
+                    except Exception:
+                        frame_urls.append("<error getting frame url>")
+                frame_info = f"{len(frame_urls)} frame(s): {frame_urls}"
+            except Exception as e:
+                frame_info = f"<error listing frames: {e}>"
+
+            logging.error(
+                "Page state dump (%s):\n"
+                "  url: %s\n"
+                "  title: %s\n"
+                "  content length: %d chars\n"
+                "  frames: %s\n"
+                "  ---- full HTML start ----\n%s\n  ---- full HTML end ----",
+                reason, url, title, content_length, frame_info, html_content,
+            )
+
+            # Optionally persist the HTML + a screenshot to disk for later inspection.
+            if os.environ.get("SAVE_FAILED_INFO") == "true":
+                await self.save_failed_info(page, url, html_content)
+        except Exception as e:
+            logging.error(f"Failed to dump page state ({reason}): {e}")
+
+    async def save_failed_info(self, page, url: Optional[str], html_content: Optional[str]) -> None:
+        """Persist the failed page's HTML and a screenshot under failed_info/.
+
+        Folder is named "<YYYYmmddHHMMSSfff>_<sanitized_hostname>"; on name
+        collision a numeric suffix (_1, _2, ...) is appended.
+        """
+        try:
+            # Derive hostname from the target/page URL.
+            hostname = ""
+            try:
+                hostname = urlparse(url or "").netloc or urlparse(page.url).netloc
+            except Exception:
+                hostname = ""
+            # Replace every special char (including ".") with an underscore.
+            safe_hostname = re.sub(r"[^0-9A-Za-z]", "_", hostname) or "unknown"
+
+            # Timestamp with millisecond precision, e.g. 20260720144350123.
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S") + f"{datetime.now().microsecond // 1000:03d}"
+
+            base_name = f"{timestamp}_{safe_hostname}"
+            target_dir = os.path.join(FAILED_INFO_DIR, base_name)
+            suffix = 1
+            while os.path.exists(target_dir):
+                target_dir = os.path.join(FAILED_INFO_DIR, f"{base_name}_{suffix}")
+                suffix += 1
+            os.makedirs(target_dir, exist_ok=True)
+
+            # Write the HTML.
+            try:
+                html_path = os.path.join(target_dir, "failed.html")
+                with open(html_path, "w", encoding="utf-8") as f:
+                    f.write(html_content if isinstance(html_content, str) else "")
+            except Exception as e:
+                logging.error(f"Failed to write failed.html: {e}")
+
+            # Write a full-page PNG screenshot (Playwright/Camoufox supports png & jpeg).
+            try:
+                screenshot_path = os.path.join(target_dir, "failed.png")
+                await page.screenshot(path=screenshot_path, full_page=True)
+            except Exception as e:
+                logging.error(f"Failed to capture screenshot: {e}")
+
+            logging.error(f"Saved failed info to folder: {os.path.basename(target_dir)}")
+        except Exception as e:
+            logging.error(f"Failed to save failed info: {e}")
 
     def parse_proxy(self, proxy: str) -> Optional[Dict[str, str]]:
         """Parse proxy URL and return proxy configuration."""
@@ -164,6 +273,11 @@ class CamoufoxBypasser:
             # Wait for challenge scripts to load and execute
             await asyncio.sleep(5)
             try:
+                nav_title = await page.title()
+                self.log_message(f"Page loaded — title: {nav_title!r}, url: {page.url}")
+            except Exception as e:
+                self.log_message(f"Could not read page title after navigation: {e}")
+            try:
                 html_content = await page.content()
             except Exception:
                 html_content = ""
@@ -181,6 +295,7 @@ class CamoufoxBypasser:
             challenge_type = await self.determine_challenge_type(page)
             if not challenge_type:
                 self.log_message("Could not determine challenge type")
+                await self.dump_page_state(page, "could not determine challenge type")
                 return False
 
             # Use ClickSolver to find and click the Cloudflare checkbox.
@@ -197,6 +312,10 @@ class CamoufoxBypasser:
                         return True
             except Exception as e:
                 self.log_message(f"Click solver reported: {e}")
+                # Dump the page state right when the solver fails — this captures
+                # what the page actually looked like (e.g. why Cloudflare iframes
+                # were not found) before further navigation changes it.
+                await self.dump_page_state(page, f"click solver failed: {e}")
 
             # The click solver's internal verification can be too hasty —
             # the checkbox click may have worked but the page needs more
@@ -213,10 +332,12 @@ class CamoufoxBypasser:
                     pass
 
             self.log_message("Failed to solve Cloudflare challenge")
+            await self.dump_page_state(page, "failed to solve Cloudflare challenge after all retries")
             return False
 
         except Exception as e:
             self.log_message(f"Error solving Cloudflare challenge: {e}")
+            await self.dump_page_state(page, f"exception while solving challenge: {e}")
             return False
 
     async def get_cookies_and_user_agent(self, context, page) -> Dict[str, Any]:
