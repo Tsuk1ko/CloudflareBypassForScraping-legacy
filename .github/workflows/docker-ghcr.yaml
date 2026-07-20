@@ -27,3 +27,4 @@ jobs:
         uses: dataaxiom/ghcr-cleanup-action@v1 # https://github.com/marketplace/actions/ghcr-io-cleanup-action
         with:
           dry-run: true
+          token: ${{ secrets.GITHUB_TOKEN }}
