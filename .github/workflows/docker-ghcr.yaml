@@ -28,4 +28,3 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           package: cloudflarebypassforscraping-legacy
-          dry-run: true
