@@ -3,6 +3,6 @@ uvicorn>=0.15.0
 pydantic>=2.0.0
 asyncio
 pyvirtualdisplay
-playwright-captcha==0.1.1
+playwright-captcha==0.1.5
 camoufox[geoip]
 curl_cffi
