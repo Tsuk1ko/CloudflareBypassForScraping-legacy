@@ -26,5 +26,6 @@ jobs:
       - name: Delete untagged (old) images from ghcr.io
         uses: dataaxiom/ghcr-cleanup-action@v1 # https://github.com/marketplace/actions/ghcr-io-cleanup-action
         with:
-          dry-run: true
           token: ${{ secrets.GITHUB_TOKEN }}
+          package: cloudflarebypassforscraping-legacy
+          dry-run: true
