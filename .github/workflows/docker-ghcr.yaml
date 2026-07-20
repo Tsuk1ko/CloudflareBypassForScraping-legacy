@@ -23,3 +23,7 @@ jobs:
         with:
           image_name: ${{ github.repository }} # it will be lowercased internally
           github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Delete untagged (old) images from ghcr.io
+        uses: dataaxiom/ghcr-cleanup-action@v1 # https://github.com/marketplace/actions/ghcr-io-cleanup-action
+        with:
+          dry-run: true
