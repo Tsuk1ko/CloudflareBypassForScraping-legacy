@@ -4,13 +4,6 @@ services:
     container_name: cloudflare-bypass
     ports:
       - "8000:8000"
-    environment:
-      # Save failed-attempt artifacts (HTML + screenshots)
-      - SAVE_FAILED_INFO=false
-    volumes:
-      # Run this if you want to save failed-attempt artifacts:
-      # mkdir -p failed_info && chmod -R 777 failed_info failed_info
-      - ./failed_info:/app/failed_info
     deploy:
       resources:
         limits:
