@@ -39,8 +39,12 @@ class CamoufoxBypasser:
             logging.info(message)
 
     async def dump_page_state(self, page, reason: str) -> None:
-        """Log the current page state (title, url, full HTML) for debugging failures.
+        """Log the current page state for debugging failures.
 
+        Always logs a short metadata summary (url, title, frames). The full HTML
+        is only dumped into the log as a fallback — when SAVE_FAILED_INFO is not
+        enabled, or when saving the artifacts to disk failed. On successful save
+        we skip the noisy HTML dump since it lives in the saved folder instead.
         Always logs regardless of self.log so failures are never silent.
         """
         try:
@@ -83,22 +87,32 @@ class CamoufoxBypasser:
                 "  url: %s\n"
                 "  title: %s\n"
                 "  content length: %d chars\n"
-                "  frames: %s\n"
-                "  ---- full HTML start ----\n%s\n  ---- full HTML end ----",
-                reason, url, title, content_length, frame_info, html_content,
+                "  frames: %s",
+                reason, url, title, content_length, frame_info,
             )
 
-            # Optionally persist the HTML + a screenshot to disk for later inspection.
+            # Try to persist the HTML + a screenshot to disk for later inspection.
+            saved = False
             if os.environ.get("SAVE_FAILED_INFO") == "true":
-                await self.save_failed_info(page, url, html_content)
+                saved = await self.save_failed_info(page, url, html_content)
+
+            # Only dump the full HTML into the log when it wasn't saved to disk.
+            if not saved:
+                logging.error(
+                    "Full page HTML (%s):\n---- full HTML start ----\n%s\n---- full HTML end ----",
+                    reason, html_content,
+                )
         except Exception as e:
             logging.error(f"Failed to dump page state ({reason}): {e}")
 
-    async def save_failed_info(self, page, url: Optional[str], html_content: Optional[str]) -> None:
+    async def save_failed_info(self, page, url: Optional[str], html_content: Optional[str]) -> bool:
         """Persist the failed page's HTML and a screenshot under failed_info/.
 
         Folder is named "<YYYYmmddHHMMSSfff>_<sanitized_hostname>"; on name
         collision a numeric suffix (_1, _2, ...) is appended.
+
+        Returns True only if the folder and HTML file were written successfully,
+        so the caller can fall back to logging the full HTML otherwise.
         """
         try:
             # Derive hostname from the target/page URL.
@@ -121,15 +135,14 @@ class CamoufoxBypasser:
                 suffix += 1
             os.makedirs(target_dir, exist_ok=True)
 
-            # Write the HTML.
-            try:
-                html_path = os.path.join(target_dir, "failed.html")
-                with open(html_path, "w", encoding="utf-8") as f:
-                    f.write(html_content if isinstance(html_content, str) else "")
-            except Exception as e:
-                logging.error(f"Failed to write failed.html: {e}")
+            # Write the HTML — this is the critical artifact; failing here means
+            # the save is considered unsuccessful so the caller logs the HTML.
+            html_path = os.path.join(target_dir, "failed.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html_content if isinstance(html_content, str) else "")
 
             # Write a full-page PNG screenshot (Playwright/Camoufox supports png & jpeg).
+            # A screenshot failure is non-fatal — we still have the HTML.
             try:
                 screenshot_path = os.path.join(target_dir, "failed.png")
                 await page.screenshot(path=screenshot_path, full_page=True)
@@ -137,8 +150,10 @@ class CamoufoxBypasser:
                 logging.error(f"Failed to capture screenshot: {e}")
 
             logging.error(f"Saved failed info to folder: {os.path.basename(target_dir)}")
+            return True
         except Exception as e:
             logging.error(f"Failed to save failed info: {e}")
+            return False
 
     def parse_proxy(self, proxy: str) -> Optional[Dict[str, str]]:
         """Parse proxy URL and return proxy configuration."""
